@@ -7,7 +7,7 @@ import { Pose } from '@mediapipe/pose';
 import { Camera } from '@mediapipe/camera_utils';
 import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
 import { FaceMesh } from '@mediapipe/face_mesh';
-import { supabase, Soldier as SupabaseSoldier } from './supabase';
+import { supabase, Soldier as SupabaseSoldier, SystemLog as SupabaseSystemLog } from './supabase';
 
 // Hand landmark connections for drawing
 const HAND_CONNECTIONS: [number, number][] = [
@@ -28,14 +28,6 @@ const POSE_CONNECTIONS: [number, number][] = [
   [27, 31], [28, 32] // feet
 ];
 
-interface SystemLog {
-  id: number;
-  created_at: string;
-  level: string;
-  tag: string | null;
-  message: string;
-  context: any;
-}
 
 
 
@@ -43,8 +35,6 @@ const App: FC = () => {
   // Core refs
   const videoeRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const rightPanelVideoRef = useRef<HTMLVideoElement>(null)
-  const rightPanelCanvasRef = useRef<HTMLCanvasElement>(null)
   const handsRef = useRef<Hands | null>(null)
   const poseRef = useRef<Pose | null>(null)
   const faceMeshRef = useRef<FaceMesh | null>(null)
@@ -55,7 +45,7 @@ const App: FC = () => {
   
   
   // System state
-  const [systemLogs, setSystemLogs] = useState<SystemLog[]>([]);
+  const [systemLogs, setSystemLogs] = useState<SupabaseSystemLog[]>([]);
   const [loading, setLoading] = useState(true);
   
   // Face detection state
@@ -75,28 +65,26 @@ const App: FC = () => {
   const [soldierImage, setSoldierImage] = useState<string | null>(null);
   const [selectedSoldier, setSelectedSoldier] = useState<SupabaseSoldier | null>(null);
   const [showSoldierDetails, setShowSoldierDetails] = useState(false);
-  const [isComparing, setIsComparing] = useState(false);
-  const [comparisonResult, setComparisonResult] = useState<SupabaseSoldier | null>(null);
+  const [currentPage, setCurrentPage] = useState<'surveillance' | 'admin'>('surveillance');
+  const [pollingInterval, setPollingInterval] = useState<NodeJS.Timeout | null>(null);
 
   const analyzeHandLandmarks = (landmarks: any) => {
     // Process hand landmarks for ASL recognition
     // This function can be expanded for gesture recognition
     
-    // Add system log entry
-    const newLog: SystemLog = {
-      id: Date.now(),
-      created_at: new Date().toISOString(),
+    // Save system log to database
+    saveSystemLog({
       level: 'INFO',
       tag: 'HAND_DETECTION',
       message: `Hand landmarks detected: ${landmarks.length} points`,
       context: {
         landmarksCount: landmarks.length,
         timestamp: new Date().toISOString()
-      }
-    };
+      },
+      created_by: 'system'
+    });
     
-    setSystemLogs(prev => [newLog, ...prev.slice(0, 99)]); // Keep last 100 logs
-      return null;
+    return null;
   };
 
   const handleFaceDetected = (faces: any[]) => {
@@ -104,10 +92,8 @@ const App: FC = () => {
       console.log('👤 Person detected! Face count:', faces.length);
       setFaceDetected(true);
       
-      // Add system log entry
-      const newLog: SystemLog = {
-        id: Date.now(),
-        created_at: new Date().toISOString(),
+      // Save system log to database
+      saveSystemLog({
         level: 'INFO',
         tag: 'FACE_DETECTION',
         message: `Person detected! Face count: ${faces.length}`,
@@ -115,10 +101,9 @@ const App: FC = () => {
           faceCount: faces.length,
           confidence: faces.map(face => face.score || 0),
           timestamp: new Date().toISOString()
-        }
-      };
-      
-      setSystemLogs(prev => [newLog, ...prev.slice(0, 99)]);
+        },
+        created_by: 'system'
+      });
     } else {
       setFaceDetected(false);
     }
@@ -211,32 +196,6 @@ const App: FC = () => {
         }
       }
       
-      // Draw on right panel canvas
-      if (rightPanelCanvasRef.current && rightPanelVideoRef.current) {
-        const canvasCtx = rightPanelCanvasRef.current.getContext('2d');
-        if (canvasCtx) {
-          // Clear canvas
-          canvasCtx.save();
-          canvasCtx.clearRect(0, 0, rightPanelCanvasRef.current.width, rightPanelCanvasRef.current.height);
-          canvasCtx.drawImage(results.image, 0, 0, rightPanelCanvasRef.current.width, rightPanelCanvasRef.current.height);
-
-          // Draw hand landmarks
-          if (results.multiHandLandmarks) {
-            for (const landmarks of results.multiHandLandmarks) {
-              drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {
-                color: '#00FF00',
-                lineWidth: 1
-              });
-              drawLandmarks(canvasCtx, landmarks, {
-                color: '#FF0000',
-                lineWidth: 0.5,
-                radius: 1
-              });
-            }
-          }
-          canvasCtx.restore();
-        }
-      }
     });
 
     pose.onResults((results) => {
@@ -272,34 +231,16 @@ const App: FC = () => {
         }
       }
       
-      // Draw on right panel canvas
-      if (rightPanelCanvasRef.current && rightPanelVideoRef.current) {
-        const canvasCtx = rightPanelCanvasRef.current.getContext('2d');
-        if (canvasCtx) {
-          // Draw pose landmarks
-          if (results.poseLandmarks) {
-            drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {
-              color: '#00FF00',
-            lineWidth: 1
-          });
-            drawLandmarks(canvasCtx, results.poseLandmarks, {
-              color: '#FF0000',
-              lineWidth: 0.5,
-              radius: 1
-            });
-          }
-        }
-      }
     });
 
     faceMesh.onResults((results: any) => {
       // Draw on main canvas
       if (canvasRef.current && videoeRef.current) {
-        const canvasCtx = canvasRef.current.getContext('2d');
+      const canvasCtx = canvasRef.current.getContext('2d');
         if (canvasCtx) {
           // Draw face mesh and detect faces
-          if (results.multiFaceLandmarks) {
-            for (const landmarks of results.multiFaceLandmarks) {
+      if (results.multiFaceLandmarks) {
+        for (const landmarks of results.multiFaceLandmarks) {
               // Draw face landmarks
           drawLandmarks(canvasCtx, landmarks, {
                 color: '#00FF00',
@@ -338,47 +279,6 @@ const App: FC = () => {
         }
       }
       
-      // Draw on right panel canvas
-      if (rightPanelCanvasRef.current && rightPanelVideoRef.current) {
-        const canvasCtx = rightPanelCanvasRef.current.getContext('2d');
-        if (canvasCtx) {
-          // Draw face mesh and detect faces
-      if (results.multiFaceLandmarks) {
-        for (const landmarks of results.multiFaceLandmarks) {
-              // Draw face landmarks
-          drawLandmarks(canvasCtx, landmarks, {
-                color: '#00FF00',
-            lineWidth: 0.5,
-            radius: 1
-          });
-
-              // Draw face outline
-              if (landmarks.length > 0) {
-                // Simple bounding box around face
-                const minX = Math.min(...landmarks.map((p: any) => p.x));
-                const maxX = Math.max(...landmarks.map((p: any) => p.x));
-                const minY = Math.min(...landmarks.map((p: any) => p.y));
-                const maxY = Math.max(...landmarks.map((p: any) => p.y));
-                
-                const x = minX * rightPanelCanvasRef.current.width;
-                const y = minY * rightPanelCanvasRef.current.height;
-                const width = (maxX - minX) * rightPanelCanvasRef.current.width;
-                const height = (maxY - minY) * rightPanelCanvasRef.current.height;
-
-                // Draw bounding box
-                canvasCtx.strokeStyle = '#00FF00';
-                canvasCtx.lineWidth = 2;
-                canvasCtx.strokeRect(x, y, width, height);
-
-                // Draw label
-                canvasCtx.fillStyle = '#00FF00';
-                canvasCtx.font = '12px Arial';
-                canvasCtx.fillText('Face', x, y - 5);
-              }
-            }
-          }
-        }
-      }
     });
 
     const camera = new Camera(videoeRef.current, {
@@ -410,35 +310,28 @@ const App: FC = () => {
         setupHandTracking();
       }
 
-      // Also set up the right panel video
-      if (rightPanelVideoRef.current) {
-        rightPanelVideoRef.current.srcObject = stream;
-      }
 
       socketService.connect();
       setIsCameraOpen(true);
       
-      // Add system log
-      const newLog: SystemLog = {
-        id: Date.now(),
-        created_at: new Date().toISOString(),
+      // Save system log to database
+      saveSystemLog({
         level: 'INFO',
         tag: 'CAMERA',
         message: 'Camera started successfully',
-        context: { action: 'start' }
-      };
-      setSystemLogs(prev => [newLog, ...prev.slice(0, 99)]);
+        context: { action: 'start' },
+        created_by: 'system'
+      });
     } catch (error) {
       console.error('Error accessing camera:', error);
-      const errorLog: SystemLog = {
-        id: Date.now(),
-        created_at: new Date().toISOString(),
+      // Save error log to database
+      saveSystemLog({
         level: 'ERROR',
         tag: 'CAMERA',
         message: `Camera error: ${error}`,
-        context: { error: String(error) }
-      };
-      setSystemLogs(prev => [errorLog, ...prev.slice(0, 99)]);
+        context: { error: String(error) },
+        created_by: 'system'
+      });
     }
   };
 
@@ -447,9 +340,6 @@ const App: FC = () => {
       const stream = videoeRef.current.srcObject as MediaStream;
       stream.getTracks().forEach(track => track.stop());
       videoeRef.current.srcObject = null;
-    }
-    if (rightPanelVideoRef.current?.srcObject) {
-      rightPanelVideoRef.current.srcObject = null;
     }
     if (handsRef.current) {
       handsRef.current.close();
@@ -463,16 +353,14 @@ const App: FC = () => {
     socketService.disconnect();
     setIsCameraOpen(false);
     
-    // Add system log
-    const newLog: SystemLog = {
-      id: Date.now(),
-      created_at: new Date().toISOString(),
+    // Save system log to database
+    saveSystemLog({
       level: 'INFO',
       tag: 'CAMERA',
       message: 'Camera stopped',
-      context: { action: 'stop' }
-    };
-    setSystemLogs(prev => [newLog, ...prev.slice(0, 99)]);
+      context: { action: 'stop' },
+      created_by: 'system'
+    });
   };
 
   const toggleCamera = async () => {
@@ -522,18 +410,49 @@ const App: FC = () => {
 
   // Initialize system logs and load soldiers
   useEffect(() => {
-    const initialLog: SystemLog = {
-      id: Date.now(),
-      created_at: new Date().toISOString(),
-      level: 'INFO',
-      tag: 'SYSTEM',
-      message: 'Sentinel Command Center initialized',
-      context: { version: '1.0.0' }
+    const initializeApp = async () => {
+      // Load system logs from database
+      await loadSystemLogs();
+      
+      // Load soldiers from database
+      await loadSoldiers();
+      
+      // Add initialization log
+      saveSystemLog({
+        level: 'INFO',
+        tag: 'SYSTEM',
+        message: 'Sentinel Command Center initialized',
+        context: { version: '1.0.0' },
+        created_by: 'system'
+      });
+      
+      setLoading(false);
     };
-    setSystemLogs([initialLog]);
-    loadSoldiers();
-    setLoading(false);
+    
+    initializeApp();
   }, []);
+
+  // Auto-poll system logs when on admin page
+  useEffect(() => {
+    if (currentPage === 'admin') {
+      // Start polling every 2 seconds
+      const interval = setInterval(() => {
+        loadSystemLogs();
+      }, 2000);
+      setPollingInterval(interval);
+      
+      return () => {
+        clearInterval(interval);
+        setPollingInterval(null);
+      };
+    } else {
+      // Clear polling when not on admin page
+      if (pollingInterval) {
+        clearInterval(pollingInterval);
+        setPollingInterval(null);
+      }
+    }
+  }, [currentPage]);
 
   // Log formatting helpers
   const formatTimestamp = (iso: string) => {
@@ -562,17 +481,30 @@ const App: FC = () => {
     return 'text-green-400';
   };
 
-  const clearLogs = () => {
-    setSystemLogs([]);
-    const clearLog: SystemLog = {
-      id: Date.now(),
-      created_at: new Date().toISOString(),
-      level: 'INFO',
-      tag: 'SYSTEM',
-      message: 'System logs cleared',
-      context: { action: 'clear' }
-    };
-    setSystemLogs([clearLog]);
+  const clearLogs = async () => {
+    try {
+      // Clear logs from database
+      const { error } = await supabase
+        .from('system_logs')
+        .delete()
+        .neq('id', 0); // Delete all logs
+
+      if (error) throw error;
+      
+      // Clear local state
+      setSystemLogs([]);
+      
+      // Add clear log to database
+      saveSystemLog({
+        level: 'INFO',
+        tag: 'SYSTEM',
+        message: 'System logs cleared',
+        context: { action: 'clear' },
+        created_by: 'user'
+      });
+    } catch (error) {
+      console.error('Error clearing logs:', error);
+    }
   };
 
   // CRUD Functions for Soldiers
@@ -615,27 +547,24 @@ const App: FC = () => {
         setSoldierImage(null);
         setShowAddForm(false);
         
-        // Add system log
-        const newLog: SystemLog = {
-          id: Date.now(),
-          created_at: new Date().toISOString(),
+        // Save system log to database
+        saveSystemLog({
           level: 'INFO',
           tag: 'SOLDIER_MGMT',
           message: `Soldier added: ${soldierData.name}`,
-          context: { action: 'add', soldierName: soldierData.name }
-        };
-        setSystemLogs(prev => [newLog, ...prev.slice(0, 99)]);
+          context: { action: 'add', soldierName: soldierData.name },
+          created_by: 'user'
+        });
       } catch (error) {
         console.error('Error adding soldier:', error);
-        const errorLog: SystemLog = {
-          id: Date.now(),
-          created_at: new Date().toISOString(),
+        // Save error log to database
+        saveSystemLog({
           level: 'ERROR',
           tag: 'SOLDIER_MGMT',
           message: `Failed to add soldier: ${error}`,
-          context: { error: String(error) }
-        };
-        setSystemLogs(prev => [errorLog, ...prev.slice(0, 99)]);
+          context: { error: String(error) },
+          created_by: 'system'
+        });
       }
     }
   };
@@ -696,27 +625,24 @@ const App: FC = () => {
         setSoldierImage(null);
         setShowAddForm(false);
         
-        // Add system log
-        const newLog: SystemLog = {
-          id: Date.now(),
-          created_at: new Date().toISOString(),
+        // Save system log to database
+        saveSystemLog({
           level: 'INFO',
           tag: 'SOLDIER_MGMT',
           message: `Soldier updated: ${newSoldier.name}`,
-          context: { action: 'update', soldierName: newSoldier.name }
-        };
-        setSystemLogs(prev => [newLog, ...prev.slice(0, 99)]);
+          context: { action: 'update', soldierName: newSoldier.name },
+          created_by: 'user'
+        });
       } catch (error) {
         console.error('Error updating soldier:', error);
-        const errorLog: SystemLog = {
-          id: Date.now(),
-          created_at: new Date().toISOString(),
+        // Save error log to database
+        saveSystemLog({
           level: 'ERROR',
           tag: 'SOLDIER_MGMT',
           message: `Failed to update soldier: ${error}`,
-          context: { error: String(error) }
-        };
-        setSystemLogs(prev => [errorLog, ...prev.slice(0, 99)]);
+          context: { error: String(error) },
+          created_by: 'system'
+        });
       }
     }
   };
@@ -733,27 +659,24 @@ const App: FC = () => {
       const soldier = soldiers.find(s => s.id === id);
       setSoldiers(soldiers.filter(s => s.id !== id));
       
-      // Add system log
-      const newLog: SystemLog = {
-        id: Date.now(),
-        created_at: new Date().toISOString(),
+      // Save system log to database
+      saveSystemLog({
         level: 'WARN',
         tag: 'SOLDIER_MGMT',
         message: `Soldier deleted: ${soldier?.name}`,
-        context: { action: 'delete', soldierName: soldier?.name }
-      };
-      setSystemLogs(prev => [newLog, ...prev.slice(0, 99)]);
+        context: { action: 'delete', soldierName: soldier?.name },
+        created_by: 'user'
+      });
     } catch (error) {
       console.error('Error deleting soldier:', error);
-      const errorLog: SystemLog = {
-        id: Date.now(),
-        created_at: new Date().toISOString(),
+      // Save error log to database
+      saveSystemLog({
         level: 'ERROR',
         tag: 'SOLDIER_MGMT',
         message: `Failed to delete soldier: ${error}`,
-        context: { error: String(error) }
-      };
-      setSystemLogs(prev => [errorLog, ...prev.slice(0, 99)]);
+        context: { error: String(error) },
+        created_by: 'system'
+      });
     }
   };
 
@@ -873,159 +796,41 @@ const App: FC = () => {
     setSelectedSoldier(null);
   };
 
-  // Gemini AI Face Comparison Function
-  const compareFacesWithGemini = async (capturedImageBase64: string, databaseImages: Array<{soldier: SupabaseSoldier, imageBase64: string}>) => {
+  // Save system log to database
+  const saveSystemLog = async (log: Omit<SupabaseSystemLog, 'id' | 'created_at'>) => {
     try {
-      const prompt = `
-You are a facial recognition AI. I will provide you with a captured image and several reference images from a database. 
-Your task is to compare the captured image with each reference image and determine which reference image is the closest match to the captured person.
+      const { data, error } = await supabase
+        .from('system_logs')
+        .insert([log])
+        .select();
 
-Instructions:
-1. Analyze the facial features, structure, and characteristics of the captured image
-2. Compare these features with each reference image
-3. Consider factors like: face shape, eye structure, nose shape, mouth, jawline, and overall facial proportions
-4. Return ONLY the index number (0-based) of the best matching reference image
-5. If no good match is found, return -1
-6. Do not provide any explanation, just the number
-
-Captured Image: ${capturedImageBase64}
-
-Reference Images:
-${databaseImages.map((item, index) => `${index}: ${item.soldier.name} - ${item.imageBase64}`).join('\n')}
-
-Return only the index number of the best match:`;
-
-      const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=YOUR_GEMINI_API_KEY', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: prompt
-            }]
-          }]
-        })
-      });
-
-      const data = await response.json();
-      const matchIndex = parseInt(data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '-1');
+      if (error) throw error;
       
-      if (matchIndex >= 0 && matchIndex < databaseImages.length) {
-        return databaseImages[matchIndex].soldier;
+      // Add to local state
+      if (data && data[0]) {
+        setSystemLogs(prev => [data[0], ...prev.slice(0, 99)]); // Keep last 100 logs
       }
-      
-      return null;
     } catch (error) {
-      console.error('Gemini AI comparison error:', error);
-      return null;
+      console.error('Error saving system log:', error);
     }
   };
 
-  // Capture current camera feed and compare with database
-  const handleCompareFaces = async () => {
-    if (!videoeRef.current || !canvasRef.current) {
-      alert('Camera not available');
-      return;
-    }
-
-    setIsComparing(true);
-    setComparisonResult(null);
-
+  // Load system logs from database
+  const loadSystemLogs = async () => {
     try {
-      // Capture current frame from camera
-      const canvas = document.createElement('canvas');
-      canvas.width = videoeRef.current.videoWidth;
-      canvas.height = videoeRef.current.videoHeight;
-      const ctx = canvas.getContext('2d');
-      
-      if (!ctx) {
-        throw new Error('Could not get canvas context');
-      }
+      const { data, error } = await supabase
+        .from('system_logs')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100);
 
-      ctx.drawImage(videoeRef.current, 0, 0);
-      const capturedImageBase64 = canvas.toDataURL('image/jpeg', 0.8);
-
-      // Get all soldiers with images from database
-      const soldiersWithImages = soldiers.filter(soldier => 
-        soldier.photo_data && soldier.photo_data.startsWith('data:image')
-      );
-
-      if (soldiersWithImages.length === 0) {
-        alert('No soldiers with images found in database');
-        setIsComparing(false);
-        return;
-      }
-
-      // Prepare data for Gemini comparison
-      const databaseImages = soldiersWithImages.map(soldier => ({
-        soldier,
-        imageBase64: soldier.photo_data!
-      }));
-
-      // For demo purposes, we'll use a simple fallback comparison
-      // In production, replace this with actual Gemini API call
-      let bestMatch = null;
-      
-      try {
-        // Try Gemini API first (requires API key)
-        bestMatch = await compareFacesWithGemini(capturedImageBase64, databaseImages);
-      } catch (error) {
-        console.log('Gemini API not available, using fallback comparison');
-        // Fallback: Simple random selection for demo
-        if (databaseImages.length > 0) {
-          const randomIndex = Math.floor(Math.random() * databaseImages.length);
-          bestMatch = databaseImages[randomIndex].soldier;
-        }
-      }
-      
-      if (bestMatch) {
-        setComparisonResult(bestMatch);
-        
-        // Add system log
-        const newLog: SystemLog = {
-          id: Date.now(),
-          created_at: new Date().toISOString(),
-          level: 'INFO',
-          tag: 'FACE_COMPARISON',
-          message: `Face comparison completed. Best match: ${bestMatch.name}`,
-          context: { 
-            matchedSoldier: bestMatch.name,
-            totalCandidates: soldiersWithImages.length
-          }
-        };
-        setSystemLogs(prev => [newLog, ...prev.slice(0, 99)]);
-      } else {
-        // Add system log for no match
-        const newLog: SystemLog = {
-          id: Date.now(),
-          created_at: new Date().toISOString(),
-          level: 'WARN',
-          tag: 'FACE_COMPARISON',
-          message: 'Face comparison completed. No match found.',
-          context: { 
-            totalCandidates: soldiersWithImages.length
-          }
-        };
-        setSystemLogs(prev => [newLog, ...prev.slice(0, 99)]);
-      }
-
+      if (error) throw error;
+      setSystemLogs(data || []);
     } catch (error) {
-      console.error('Face comparison error:', error);
-      const errorLog: SystemLog = {
-        id: Date.now(),
-        created_at: new Date().toISOString(),
-        level: 'ERROR',
-        tag: 'FACE_COMPARISON',
-        message: `Face comparison failed: ${error}`,
-        context: { error: String(error) }
-      };
-      setSystemLogs(prev => [errorLog, ...prev.slice(0, 99)]);
-    } finally {
-      setIsComparing(false);
+      console.error('Error loading system logs:', error);
     }
   };
+
 
   // Load soldiers from Supabase
   const loadSoldiers = async () => {
@@ -1039,15 +844,14 @@ Return only the index number of the best match:`;
       setSoldiers(data || []);
     } catch (error) {
       console.error('Error loading soldiers:', error);
-      const errorLog: SystemLog = {
-        id: Date.now(),
-        created_at: new Date().toISOString(),
+      // Save error log to database
+      saveSystemLog({
         level: 'ERROR',
         tag: 'SOLDIER_MGMT',
         message: `Failed to load soldiers: ${error}`,
-        context: { error: String(error) }
-      };
-      setSystemLogs(prev => [errorLog, ...prev.slice(0, 99)]);
+        context: { error: String(error) },
+        created_by: 'system'
+      });
     }
   };
 
@@ -1066,6 +870,30 @@ Return only the index number of the best match:`;
         </div>
         
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4">
+          {/* Navigation Buttons */}
+          <div className="flex gap-2">
+            <button 
+              onClick={() => setCurrentPage('surveillance')}
+              className={`px-4 py-2 rounded-lg transition-colors text-sm font-medium ${
+                currentPage === 'surveillance'
+                  ? 'bg-blue-600 text-white' 
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              Surveillance
+            </button>
+            <button 
+              onClick={() => setCurrentPage('admin')}
+              className={`px-4 py-2 rounded-lg transition-colors text-sm font-medium ${
+                currentPage === 'admin'
+                  ? 'bg-blue-600 text-white' 
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              Admin Panel
+            </button>
+          </div>
+          
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 bg-green-500 rounded-full"></div>
             <span className="text-sm text-green-400">connected</span>
@@ -1073,16 +901,18 @@ Return only the index number of the best match:`;
           <div className="text-sm text-gray-400">
             {currentTime.toLocaleDateString()}, {currentTime.toLocaleTimeString()}
           </div>
-          <button 
-            onClick={toggleCamera} 
-            className={`px-4 py-2 rounded-lg transition-colors ${
-              isCameraOpen 
-                ? 'bg-green-600 hover:bg-green-700 text-white' 
-                : 'bg-purple-600 hover:bg-purple-700 text-white'
-            }`}
-          >
-            {isCameraOpen ? 'Camera ON' : 'Start Camera'}
-          </button>
+          {currentPage === 'surveillance' && (
+            <button 
+              onClick={toggleCamera} 
+              className={`px-4 py-2 rounded-lg transition-colors ${
+                isCameraOpen 
+                  ? 'bg-green-600 hover:bg-green-700 text-white' 
+                  : 'bg-purple-600 hover:bg-purple-700 text-white'
+              }`}
+            >
+              {isCameraOpen ? 'Camera ON' : 'Start Camera'}
+            </button>
+          )}
           <button className="text-gray-400 hover:text-white transition-colors">
             Logout
           </button>
@@ -1090,7 +920,8 @@ Return only the index number of the best match:`;
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col xl:flex-row p-6 gap-6">
+      {currentPage === 'surveillance' ? (
+        <div className="flex-1 flex flex-col xl:flex-row p-6 gap-6">
         {/* Left Panel - Main Surveillance Feed */}
         <div className="flex-1 bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-6 border border-gray-600 shadow-2xl">
           <div className="flex justify-between items-center mb-6">
@@ -1154,159 +985,280 @@ Return only the index number of the best match:`;
           </div>
         </div>
 
-        {/* Right Panel - Face Recognition */}
-        <div className="w-full xl:w-96 bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-6 border border-gray-600 shadow-2xl">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-xl font-bold text-white">Face Recognition</h2>
+      </div>
+      ) : (
+        /* Admin Panel */
+        <div className="flex-1 flex flex-col">
+          {/* System Logs Section */}
+          <div className="bg-gray-900 border-t border-gray-700 p-4">
+            <div className="flex justify-between items-center mb-4">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                <h2 className="text-lg font-bold text-white">System Logs</h2>
+                <span className="text-red-400 text-sm font-medium">LIVE MONITORING</span>
+                <span className="text-green-400 text-xs">(Auto-refresh: 2s)</span>
+              </div>
               <button 
-              onClick={handleCompareFaces}
-              disabled={isComparing}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 shadow-lg ${
-                isComparing 
-                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed' 
-                  : 'bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white'
-              }`}
-            >
-              {isComparing ? 'Comparing...' : 'Compare'}
-            </button>
-          </div>
-            
-          <div className="space-y-6">
-            {/* Status Indicators */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-gradient-to-r from-green-900/30 to-green-800/30 rounded-lg p-3 border border-green-500/30">
-                <div className="flex items-center gap-2 mb-1">
-                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                  <span className="text-green-300 text-xs font-medium">FACE DETECTION</span>
-                </div>
-                <div className="text-white text-lg font-bold">
-                  {faceDetected ? 'ACTIVE' : 'INACTIVE'}
-                </div>
-              </div>
-              <div className="bg-gradient-to-r from-blue-900/30 to-blue-800/30 rounded-lg p-3 border border-blue-500/30">
-                <div className="flex items-center gap-2 mb-1">
-                  <div className="w-2 h-2 bg-blue-400 rounded-full"></div>
-                  <span className="text-blue-300 text-xs font-medium">CAMERA STATUS</span>
-                </div>
-                <div className="text-white text-lg font-bold">
-                  {isCameraOpen ? 'ONLINE' : 'OFFLINE'}
-                </div>
-              </div>
+                onClick={clearLogs}
+                className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-sm transition-colors"
+              >
+                Clear Logs
+              </button>
             </div>
-             {/* Live Feed Section */}
-             <div className="bg-gradient-to-br from-gray-800 to-gray-700 rounded-xl p-4 border border-gray-600">
-               <div className="flex justify-between items-center mb-4">
-                 <h3 className="text-white font-semibold text-lg">Live Feed</h3>
-                 <div className="bg-gradient-to-r from-green-600 to-green-700 text-white px-3 py-1 rounded-full text-xs font-medium">
-                   ESP32
-                 </div>
-               </div>
-               <div className="relative w-full h-64 bg-black rounded-lg overflow-hidden border-2 border-gray-600 shadow-lg">
-                  {isCameraOpen ? (
-                   <div className="relative w-full h-full">
-                     <video 
-                       ref={rightPanelVideoRef} 
-                       autoPlay
-                       playsInline 
-                       muted
-                       className="w-full h-full object-cover"
-                     />
-                     <canvas 
-                       ref={rightPanelCanvasRef}
-                       className="absolute top-0 left-0 w-full h-full"
-                     />
-                     {faceDetected && (
-                       <div className="absolute top-2 left-2 bg-green-600/90 text-white px-3 py-1 rounded-lg text-xs font-semibold backdrop-blur-sm border border-green-400">
-                         👤 Person Detected
-                       </div>
-                     )}
-                   </div>
-                 ) : (
-                   <div className="flex items-center justify-center h-full bg-gradient-to-br from-gray-800 to-gray-900">
-                     <div className="text-center">
-                       <div className="w-12 h-12 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-3">
-                         <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                         </svg>
-                       </div>
-                       <div className="text-gray-400 text-sm font-medium">No Camera Feed</div>
-                       <div className="text-gray-500 text-xs mt-1">Start camera to begin</div>
-                     </div>
-                   </div>
-                 )}
-               </div>
-             </div>
             
-            {/* Database Section */}
-            <div className="bg-gradient-to-br from-gray-800 to-gray-700 rounded-xl p-4 border border-gray-600">
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-white font-semibold text-lg">Database</h3>
-                <div className={`px-3 py-1 rounded-full text-xs font-medium ${
-                  comparisonResult 
-                    ? 'bg-gradient-to-r from-green-600 to-green-700 text-white' 
-                    : 'bg-gradient-to-r from-blue-600 to-blue-700 text-white'
-                }`}>
-                  {comparisonResult ? 'Match Found' : 'Reference'}
-                </div>
-              </div>
-              
-              {comparisonResult ? (
-                <div className="w-full h-48 bg-gradient-to-br from-gray-800 to-gray-900 rounded-lg border-2 border-green-500 shadow-lg p-4">
-                  <div className="flex items-center gap-4 h-full">
-                    {/* Matched Soldier Image */}
-                    <div className="w-20 h-20 bg-gray-700 rounded-full flex items-center justify-center overflow-hidden border-2 border-green-500">
-                      {comparisonResult.photo_data && comparisonResult.photo_data.startsWith('data:image') ? (
-                        <img 
-                          src={comparisonResult.photo_data} 
-                          alt={`${comparisonResult.name} photo`}
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <span className="text-white text-lg font-bold">
-                          {comparisonResult.photo_data || comparisonResult.name.substring(0, 2).toUpperCase()}
-                        </span>
-                      )}
-                    </div>
-                    
-                    {/* Match Details */}
-                    <div className="flex-1">
-                      <div className="text-green-400 text-sm font-medium mb-1">✓ MATCH FOUND</div>
-                      <div className="text-white text-lg font-bold mb-1">{comparisonResult.name}</div>
-                      <div className="text-gray-300 text-sm mb-1">{comparisonResult.position}</div>
-                      <div className="flex items-center gap-2">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${
-                          comparisonResult.status === 'Active' 
-                            ? 'bg-green-600 text-white' 
-                            : 'bg-red-600 text-white'
-                        }`}>
-                          {comparisonResult.status}
-                        </span>
-                        <span className="text-gray-400 text-xs">ID: #{comparisonResult.id}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+            <div className="bg-black rounded-lg p-4 h-32 overflow-y-auto border border-gray-600">
+              {loading ? (
+                <div className="text-gray-500 text-sm">Loading logs...</div>
+              ) : systemLogs.length === 0 ? (
+                <div className="text-gray-500 text-sm">No logs available</div>
               ) : (
-                <div className="w-full h-48 bg-gradient-to-br from-gray-800 to-gray-900 rounded-lg flex flex-col items-center justify-center border-2 border-gray-600 shadow-lg">
-                  <div className="w-16 h-16 bg-gray-700 rounded-full flex items-center justify-center mb-4">
-                    <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
-                </svg>
-                  </div>
-                  <div className="text-gray-300 text-sm font-medium mb-1">
-                    {isComparing ? 'Analyzing...' : 'No match found'}
-                  </div>
-                  <div className="text-gray-500 text-xs text-center">
-                    {isComparing ? 'Please wait...' : 'Click Compare to analyze'}
-                  </div>
+                <div className="w-full h-full overflow-y-auto">
+                  <pre className="whitespace-pre-wrap text-xs font-mono">
+                    {systemLogs.map((log) => {
+                      const ts = formatTimestamp(log.created_at);
+                      return (
+                        <div key={log.id} className="mb-1">
+                          <span className="text-gray-500">[{ts}]</span>{' '}
+                          <span className={`${getLevelClass(log.level)} font-semibold`}>[{log.level.toUpperCase()}]</span>{' '}
+                          {log.tag && (
+                            <span className={`${getTagClass(log.tag)} font-semibold`}>[{log.tag.toUpperCase()}]</span>
+                          )}{' '}
+                          <span className="text-green-400">{log.message}</span>
+                          {log.context && Object.keys(log.context).length > 0 && (
+                            <div className="ml-4 mt-1 text-gray-400 text-xs">
+                              {Object.entries(log.context).map(([key, value]) => (
+                                <div key={key}>{key}: {String(value)}</div>
+                              ))}
+              </div>
+            )}
+                        </div>
+                      );
+                    })}
+                  </pre>
                 </div>
               )}
             </div>
           </div>
-        </div>
-      </div>
 
-      {/* Bottom Panel - System Logs */}
+          {/* Soldiers Records Section */}
+          <div className="bg-gray-900 border-t border-gray-700 p-6">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold text-white">Soldiers Records</h2>
+              <div className="flex items-center gap-4">
+                <span className="text-gray-400 text-sm">{soldiers.length} soldiers</span>
+                <button 
+                  onClick={() => setShowAddForm(true)}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                >
+                  Add Soldier
+                </button>
+              </div>
+            </div>
+
+            {/* Add/Edit Form */}
+            {showAddForm && (
+              <div className="bg-gray-800 rounded-lg p-6 mb-6 border border-gray-600">
+                <h3 className="text-lg font-bold text-white mb-4">
+                  {editingSoldier ? 'Edit Soldier' : 'Add New Soldier'}
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Name</label>
+              <input
+                      type="text"
+                      value={newSoldier.name}
+                      onChange={(e) => setNewSoldier({...newSoldier, name: e.target.value})}
+                      className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                      placeholder="Enter soldier name"
+                    />
+            </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Position</label>
+                    <input
+                      type="text"
+                      value={newSoldier.position}
+                      onChange={(e) => setNewSoldier({...newSoldier, position: e.target.value})}
+                      className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                      placeholder="Enter position"
+                    />
+          </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Sex</label>
+                    <select
+                      value={newSoldier.sex}
+                      onChange={(e) => setNewSoldier({...newSoldier, sex: e.target.value as 'Male' | 'Female'})}
+                      className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="Male">Male</option>
+                      <option value="Female">Female</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Age</label>
+                    <input
+                      type="number"
+                      value={newSoldier.age}
+                      onChange={(e) => setNewSoldier({...newSoldier, age: e.target.value})}
+                      className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                      placeholder="Enter age"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Status</label>
+                    <select
+                      value={newSoldier.status}
+                      onChange={(e) => setNewSoldier({...newSoldier, status: e.target.value as 'Active' | 'Inactive'})}
+                      className="w-full bg-gray-700 text-white px-3 py-2 rounded-lg border border-gray-600 focus:border-blue-500 focus:outline-none"
+                    >
+                      <option value="Active">Active</option>
+                      <option value="Inactive">Inactive</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">Photo</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleFileUpload}
+                        className="hidden"
+                        id="soldier-photo-upload"
+                      />
+                      <label
+                        htmlFor="soldier-photo-upload"
+                        className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg text-sm cursor-pointer transition-colors"
+                      >
+                        Upload File
+                      </label>
+              <button 
+                        onClick={handleCameraCapture}
+                        className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg text-sm transition-colors"
+                      >
+                        Take Photo
+                      </button>
+                      {soldierImage && (
+                        <button
+                          onClick={removeImage}
+                          className="bg-red-600 hover:bg-red-700 text-white px-3 py-2 rounded-lg text-sm transition-colors"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                    {soldierImage && (
+                      <div className="mt-2">
+                        <img
+                          src={soldierImage}
+                          alt="Soldier preview"
+                          className="w-16 h-16 object-cover rounded-lg border border-gray-600"
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex gap-3 mt-4">
+                  <button
+                    onClick={editingSoldier ? updateSoldier : addSoldier}
+                    className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                  >
+                    {editingSoldier ? 'Update' : 'Add'} Soldier
+              </button>
+                <button 
+                    onClick={cancelForm}
+                    className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Soldiers Table */}
+            <div className="bg-gray-800 rounded-lg overflow-hidden border border-gray-600">
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-gray-700">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Photo</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Name</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Position</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Sex</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Age</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Status</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-600">
+                    {soldiers.map((soldier) => (
+                      <tr key={soldier.id} className="hover:bg-gray-700">
+                        <td className="px-6 py-4">
+                          {soldier.photo_data ? (
+                            <img
+                              src={soldier.photo_data}
+                              alt={`${soldier.name} photo`}
+                              className="w-10 h-10 object-cover rounded-full border border-gray-500"
+                              onError={(e) => {
+                                const target = e.target as HTMLImageElement;
+                                target.style.display = 'none';
+                                const fallback = target.nextElementSibling as HTMLElement;
+                                if (fallback) fallback.style.display = 'flex';
+                              }}
+                            />
+                          ) : null}
+                          <div 
+                            className="w-10 h-10 bg-gray-600 rounded-full flex items-center justify-center text-white font-bold text-sm"
+                            style={{ display: soldier.photo_data ? 'none' : 'flex' }}
+                          >
+                            {soldier.name.split(' ').map(n => n[0]).join('').toUpperCase()}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 text-white font-medium">{soldier.name}</td>
+                        <td className="px-6 py-4 text-gray-300">{soldier.position}</td>
+                        <td className="px-6 py-4 text-gray-300">{soldier.sex}</td>
+                        <td className="px-6 py-4 text-gray-300">{soldier.age}</td>
+                        <td className="px-6 py-4">
+                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                            soldier.status === 'Active' 
+                              ? 'bg-green-600 text-white' 
+                              : 'bg-red-600 text-white'
+                          }`}>
+                            {soldier.status}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex gap-3">
+                            <button 
+                              onClick={() => showSoldierDetailsModal(soldier)}
+                              className="text-green-400 hover:text-green-300 text-sm"
+                            >
+                              Details
+                            </button>
+                            <button 
+                              onClick={() => editSoldier(soldier)}
+                              className="text-blue-400 hover:text-blue-300 text-sm"
+                            >
+                              Edit
+                            </button>
+                            <button 
+                              onClick={() => soldier.id && deleteSoldier(soldier.id)}
+                              className="text-red-400 hover:text-red-300 text-sm"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bottom Panel - System Logs (only show on surveillance page) */}
+      {currentPage === 'surveillance' && (
       <div className="bg-gray-900 border-t border-gray-700 p-4">
         <div className="flex justify-between items-center mb-4">
           <div className="flex items-center gap-2">
@@ -1345,18 +1297,20 @@ Return only the index number of the best match:`;
                           {Object.entries(log.context).map(([key, value]) => (
                             <div key={key}>{key}: {String(value)}</div>
                   ))}
-            </div>
-                      )}
-          </div>
+              </div>
+            )}
+              </div>
                   );
                 })}
               </pre>
-        </div>
-            )}
-              </div>
             </div>
+            )}
+          </div>
+        </div>
+      )}
 
-      {/* Soldiers Records Section */}
+      {/* Soldiers Records Section (only show on surveillance page) */}
+      {currentPage === 'surveillance' && (
       <div className="bg-gray-900 border-t border-gray-700 p-6">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-2xl font-bold text-white">Soldiers Records</h2>
@@ -1368,7 +1322,7 @@ Return only the index number of the best match:`;
             >
               Add Soldier
               </button>
-          </div>
+              </div>
         </div>
             
         {/* Add/Edit Form */}
@@ -1380,14 +1334,14 @@ Return only the index number of the best match:`;
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-2">Name</label>
-                <input
+              <input
                   type="text"
                   value={newSoldier.name}
                   onChange={(e) => setNewSoldier({...newSoldier, name: e.target.value})}
                   className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
                   placeholder="Enter name"
                 />
-              </div>
+            </div>
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-2">Position</label>
                 <input
@@ -1397,7 +1351,7 @@ Return only the index number of the best match:`;
                   className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-blue-500"
                   placeholder="Enter position"
                 />
-            </div>
+          </div>
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-2">Sex</label>
                 <select
@@ -1489,7 +1443,7 @@ Return only the index number of the best match:`;
             </div>
                 </div>
             <div className="flex gap-3 mt-6">
-              <button
+                <button 
                 onClick={editingSoldier ? updateSoldier : addSoldier}
                 className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
               >
@@ -1600,7 +1554,7 @@ Return only the index number of the best match:`;
                           className="text-green-400 hover:text-green-300 text-sm"
                         >
                           Details
-                        </button>
+                </button>
                         <button 
                           onClick={() => editSoldier(soldier)}
                           className="text-blue-400 hover:text-blue-300 text-sm"
@@ -1622,6 +1576,7 @@ Return only the index number of the best match:`;
                 </div>
               </div>
                   </div>
+      )}
 
       {/* Floating Soldier Details Modal */}
       {showSoldierDetails && selectedSoldier && (
@@ -1649,7 +1604,7 @@ Return only the index number of the best match:`;
                       {selectedSoldier.photo_data || selectedSoldier.name.substring(0, 2).toUpperCase()}
                     </span>
                   )}
-                </div>
+              </div>
                 
                 <div>
                   <h2 className="text-3xl font-bold text-white mb-2">{selectedSoldier.name}</h2>
@@ -1668,14 +1623,14 @@ Return only the index number of the best match:`;
                 </div>
               </div>
               
-              <button
+              <button 
                 onClick={closeSoldierDetails}
                 className="text-gray-400 hover:text-white text-2xl font-bold transition-colors"
               >
                 ×
               </button>
           </div>
-
+            
             {/* Details Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
               <div className="bg-gray-800 rounded-lg p-4 border border-gray-600">
@@ -1693,8 +1648,8 @@ Return only the index number of the best match:`;
                     <span className="text-gray-400">Sex:</span>
                     <span className="text-white font-medium">{selectedSoldier.sex}</span>
     </div>
-                </div>
               </div>
+                  </div>
 
               <div className="bg-gray-800 rounded-lg p-4 border border-gray-600">
                 <h3 className="text-lg font-semibold text-white mb-3">Service Information</h3>
@@ -1709,14 +1664,14 @@ Return only the index number of the best match:`;
                       selectedSoldier.status === 'Active' ? 'text-green-400' : 'text-red-400'
                     }`}>
                       {selectedSoldier.status}
-                    </span>
-                  </div>
+                      </span>
+                    </div>
                   <div className="flex justify-between">
                     <span className="text-gray-400">ID:</span>
                     <span className="text-white font-medium">#{selectedSoldier.id}</span>
-                  </div>
                 </div>
               </div>
+                  </div>
             </div>
 
             {/* Timestamps */}
@@ -1727,8 +1682,8 @@ Return only the index number of the best match:`;
                   <span className="text-gray-400">Created:</span>
                   <span className="text-white font-medium">
                     {new Date(selectedSoldier.created_at).toLocaleDateString()}
-                  </span>
-                </div>
+                      </span>
+                    </div>
                 <div className="flex justify-between">
                   <span className="text-gray-400">Last Updated:</span>
                   <span className="text-white font-medium">
@@ -1736,7 +1691,7 @@ Return only the index number of the best match:`;
                   </span>
                 </div>
               </div>
-            </div>
+          </div>
 
             {/* Action Buttons */}
             <div className="flex gap-3 justify-end">
@@ -1755,8 +1710,8 @@ Return only the index number of the best match:`;
               >
                 Close
               </button>
-            </div>
-          </div>
+        </div>
+      </div>
         </div>
       )}
     </div>

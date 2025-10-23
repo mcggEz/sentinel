@@ -16,3 +16,13 @@ export interface Soldier {
   created_at: string;
   updated_at: string;
 }
+
+export interface SystemLog {
+  id: number;
+  created_at: string;
+  level: 'ERROR' | 'WARN' | 'INFO' | 'DEBUG';
+  tag: string | null;
+  message: string;
+  context: any;
+  created_by: string;
+}
